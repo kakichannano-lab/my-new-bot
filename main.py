@@ -1,6 +1,6 @@
 import discord
 from discord import app_commands
-from discord.ext import commands, tasks
+from discord.ext import commands
 import datetime
 import os
 import json
@@ -54,7 +54,7 @@ def save_data(data_to_save):
 def get_slots():
     slots = []
     current_time = datetime.datetime.strptime("13:00", "%H:%M")
-    for i in range(34): 
+    for i in range(34): # 13:00から25分刻みで34枠(翌02:45開始分まで)
         slots.append({
             "start": current_time.strftime('%H:%M'), 
             "user": "空き", 
@@ -64,20 +64,15 @@ def get_slots():
         current_time = current_time + datetime.timedelta(minutes=25)
     return slots
 
-# --- 💡 時刻チェック用ロジック ---
+# --- 時刻チェック用ロジック ---
 def is_past(time_str):
-    """予約時間が現在時刻より前かどうかを判定する"""
     now = datetime.datetime.now()
     try:
-        # 予約時間を当日の時間に変換
         t = datetime.datetime.strptime(time_str, "%H:%M").replace(
             year=now.year, month=now.month, day=now.day
         )
-        # 00:00〜03:00の枠は「翌日」として扱う
-        if 0 <= t.hour <= 3:
+        if 0 <= t.hour <= 3: # 深夜枠の処理
             t += datetime.timedelta(days=1)
-        
-        # 現在時刻より5分以上前なら「過去」とみなす（少し余裕を持たせる）
         return now > (t + datetime.timedelta(minutes=5))
     except:
         return False
@@ -85,16 +80,14 @@ def is_past(time_str):
 # --- 表示とボタンのロジック ---
 def format_line(slot):
     status = slot["status"]
-    # 時間が過ぎていたら[終了]にする
     if is_past(slot["start"]):
         return f"[終　了] {slot['start']} | {slot['user'][:10]}"
-    
     text = "[予約済]" if status == 1 else ("[不　可]" if status == 2 else "[空　き]")
     return f"{text} {slot['start']} | {slot['user'][:10]}"
 
 def gen_embed(slots, is_second):
     title = "📅 予約リスト (後半 20:05〜)" if is_second else "📅 予約リスト (前半 13:00〜)"
-    embed = discord.Embed(title=title, color=0x3498db if not is_second else 0x9b59b6)
+    embed = discord.Embed(title=title, color=0x9b59b6 if is_second else 0x3498db)
     idx = range(17, 34) if is_second else range(0, 17)
     lines = [format_line(slots[i]) for i in idx]
     embed.description = "```\n" + "\n".join(lines) + "\n```"
@@ -111,13 +104,11 @@ class ReserveButton(discord.ui.Button):
         if self.gid not in db: db[self.gid] = get_slots()
         data = db[self.gid][self.index]
         
-        # ボタンを押した瞬間に時間が過ぎていないか再チェック
         if is_past(data["start"]):
             return await interaction.response.send_message("❌ この枠はもう終了してるで！", ephemeral=True)
 
         user = interaction.user
         is_admin = user.guild_permissions.administrator
-        
         if data["status"] == 1 and data["uid"] != user.id and not is_admin:
             return await interaction.response.send_message("❌ 他人の予約は変更できへんで", ephemeral=True)
         
@@ -138,29 +129,44 @@ def gen_view(gid, slots, is_second):
     idx = range(17, 34) if is_second else range(0, 17)
     for i in idx:
         d = slots[i]
-        # 💡 時間が過ぎていたらボタンをグレー（disabled=True）にする
         past = is_past(d["start"])
         row = (i % 17) // 4 
         btn = ReserveButton(gid, i, d["start"], row, disabled=past)
-        
         if past:
-            btn.style = discord.ButtonStyle.secondary # グレー
+            btn.style = discord.ButtonStyle.secondary
         else:
             btn.style = discord.ButtonStyle.danger if d["status"] == 1 else (discord.ButtonStyle.secondary if d["status"] == 2 else discord.ButtonStyle.primary)
-        
         view.add_item(btn)
     return view
 
-# --- スラッシュコマンド ---
-@bot.tree.command(name="全時間", description="25分単位の管理表を表示します")
+# --- スラッシュコマンド群 ---
+@bot.tree.command(name="全時間", description="【全時間帯 (13:00〜03:00)】を表示します")
 async def setup_slash(interaction: discord.Interaction):
     db = load_data()
     gid = interaction.guild_id
-    db[gid] = get_slots()
-    save_data(db)
-    await interaction.response.send_message(f"📢 25分単位の予約管理表を作成したで！", ephemeral=False)
+    db[gid] = get_slots(); save_data(db)
+    await interaction.response.send_message("📢 予約管理表（全時間）を呼び出しました。", ephemeral=False)
     await interaction.channel.send(embed=gen_embed(db[gid], False), view=gen_view(gid, db[gid], False))
     await interaction.channel.send(embed=gen_embed(db[gid], True), view=gen_view(gid, db[gid], True))
+
+@bot.tree.command(name="前半", description="【前半 (13:00〜19:40)】のみ表示します")
+async def front_slash(interaction: discord.Interaction):
+    db = load_data()
+    gid = interaction.guild_id
+    if gid not in db: db[gid] = get_slots(); save_data(db)
+    await interaction.response.send_message(embed=gen_embed(db[gid], False), view=gen_view(gid, db[gid], False))
+
+@bot.tree.command(name="後半", description="【後半 (20:05〜02:45)】のみ表示します")
+async def back_slash(interaction: discord.Interaction):
+    db = load_data()
+    gid = interaction.guild_id
+    if gid not in db: db[gid] = get_slots(); save_data(db)
+    await interaction.response.send_message(embed=gen_embed(db[gid], True), view=gen_view(gid, db[gid], True))
+
+@bot.tree.command(name="リセット", description="すべての予約をリセットします")
+async def reset_slash(interaction: discord.Interaction):
+    db = load_data(); db[interaction.guild_id] = get_slots(); save_data(db)
+    await interaction.response.send_message("♻️ **予約リストをリセットしたで！**")
 
 if __name__ == "__main__":
     keep_alive()
