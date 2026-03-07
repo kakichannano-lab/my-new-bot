@@ -11,7 +11,9 @@ from threading import Thread
 app = Flask('')
 @app.route('/')
 def home(): 
-    return f"Bot is active! {datetime.datetime.now()}"
+    # 稼働確認画面も日本時間で表示
+    now_jst = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+    return f"Bot is active! (JST: {now_jst.strftime('%Y-%m-%d %H:%M:%S')})"
 
 def run(): 
     app.run(host='0.0.0.0', port=10000)
@@ -54,7 +56,7 @@ def save_data(data_to_save):
 def get_slots():
     slots = []
     current_time = datetime.datetime.strptime("13:00", "%H:%M")
-    for i in range(34): # 13:00から25分刻みで34枠(翌02:45開始分まで)
+    for i in range(34): # 13:00から25分刻みで34枠
         slots.append({
             "start": current_time.strftime('%H:%M'), 
             "user": "空き", 
@@ -64,15 +66,21 @@ def get_slots():
         current_time = current_time + datetime.timedelta(minutes=25)
     return slots
 
-# --- 時刻チェック用ロジック ---
+# --- 💡 時刻チェック用ロジック (日本時間強制対応) ---
 def is_past(time_str):
-    now = datetime.datetime.now()
+    # 日本時間 (UTC+9) を取得してタイムゾーンを消す
+    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).replace(tzinfo=None)
+    
     try:
+        # 予約時間を当日の日時に変換
         t = datetime.datetime.strptime(time_str, "%H:%M").replace(
             year=now.year, month=now.month, day=now.day
         )
-        if 0 <= t.hour <= 3: # 深夜枠の処理
+        # 00:00〜03:00の枠は「翌日の深夜」として扱う
+        if 0 <= t.hour <= 3:
             t += datetime.timedelta(days=1)
+            
+        # 現在時刻より5分以上前なら「終了」と判定
         return now > (t + datetime.timedelta(minutes=5))
     except:
         return False
@@ -104,6 +112,7 @@ class ReserveButton(discord.ui.Button):
         if self.gid not in db: db[self.gid] = get_slots()
         data = db[self.gid][self.index]
         
+        # ボタン押下時に再判定
         if is_past(data["start"]):
             return await interaction.response.send_message("❌ この枠はもう終了してるで！", ephemeral=True)
 
@@ -142,24 +151,20 @@ def gen_view(gid, slots, is_second):
 # --- スラッシュコマンド群 ---
 @bot.tree.command(name="全時間", description="【全時間帯 (13:00〜03:00)】を表示します")
 async def setup_slash(interaction: discord.Interaction):
-    db = load_data()
-    gid = interaction.guild_id
-    db[gid] = get_slots(); save_data(db)
+    db = load_data(); gid = interaction.guild_id; db[gid] = get_slots(); save_data(db)
     await interaction.response.send_message("📢 予約管理表（全時間）を呼び出しました。", ephemeral=False)
     await interaction.channel.send(embed=gen_embed(db[gid], False), view=gen_view(gid, db[gid], False))
     await interaction.channel.send(embed=gen_embed(db[gid], True), view=gen_view(gid, db[gid], True))
 
 @bot.tree.command(name="前半", description="【前半 (13:00〜19:40)】のみ表示します")
 async def front_slash(interaction: discord.Interaction):
-    db = load_data()
-    gid = interaction.guild_id
+    db = load_data(); gid = interaction.guild_id
     if gid not in db: db[gid] = get_slots(); save_data(db)
     await interaction.response.send_message(embed=gen_embed(db[gid], False), view=gen_view(gid, db[gid], False))
 
 @bot.tree.command(name="後半", description="【後半 (20:05〜02:45)】のみ表示します")
 async def back_slash(interaction: discord.Interaction):
-    db = load_data()
-    gid = interaction.guild_id
+    db = load_data(); gid = interaction.guild_id
     if gid not in db: db[gid] = get_slots(); save_data(db)
     await interaction.response.send_message(embed=gen_embed(db[gid], True), view=gen_view(gid, db[gid], True))
 
