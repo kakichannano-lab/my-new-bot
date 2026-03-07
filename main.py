@@ -11,7 +11,9 @@ from threading import Thread
 app = Flask('')
 @app.route('/')
 def home(): 
-    return f"Bot is active! {datetime.datetime.now()}"
+    # 稼働確認画面も日本時間で表示
+    now_jst = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
+    return f"Bot is active! (JST: {now_jst.strftime('%Y-%m-%d %H:%M:%S')})"
 
 def run(): 
     app.run(host='0.0.0.0', port=10000)
@@ -29,7 +31,7 @@ class MyBot(commands.Bot):
 
     async def setup_hook(self):
         await self.tree.sync()
-        print("✅ 全コマンドの同期が完了しました")
+        print("✅ スラッシュコマンドを同期しました")
 
 bot = MyBot()
 
@@ -64,10 +66,30 @@ def get_slots():
         current_time = current_time + datetime.timedelta(minutes=25)
     return slots
 
+# --- 💡 時刻チェック用ロジック (日本時間強制対応) ---
+def is_past(time_str):
+    # 日本時間 (UTC+9) を取得してタイムゾーンを消す
+    now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9))).replace(tzinfo=None)
+    
+    try:
+        # 予約時間を当日の日時に変換
+        t = datetime.datetime.strptime(time_str, "%H:%M").replace(
+            year=now.year, month=now.month, day=now.day
+        )
+        # 00:00〜03:00の枠は「翌日の深夜」として扱う
+        if 0 <= t.hour <= 3:
+            t += datetime.timedelta(days=1)
+            
+        # 現在時刻より5分以上前なら「終了」と判定
+        return now > (t + datetime.timedelta(minutes=5))
+    except:
+        return False
+
 # --- 表示とボタンのロジック ---
 def format_line(slot):
     status = slot["status"]
-    # 常にステータスを表示（終了判定なし）
+    if is_past(slot["start"]):
+        return f"[終　了] {slot['start']} | {slot['user'][:10]}"
     text = "[予約済]" if status == 1 else ("[不　可]" if status == 2 else "[空　き]")
     return f"{text} {slot['start']} | {slot['user'][:10]}"
 
@@ -80,8 +102,8 @@ def gen_embed(slots, is_second):
     return embed
 
 class ReserveButton(discord.ui.Button):
-    def __init__(self, gid, index, label, row):
-        super().__init__(label=label, custom_id=f"btn_{gid}_{index}", row=row)
+    def __init__(self, gid, index, label, row, disabled=False):
+        super().__init__(label=label, custom_id=f"btn_{gid}_{index}", row=row, disabled=disabled)
         self.gid = gid
         self.index = index
 
@@ -90,18 +112,18 @@ class ReserveButton(discord.ui.Button):
         if self.gid not in db: db[self.gid] = get_slots()
         data = db[self.gid][self.index]
         
+        # ボタン押下時に再判定
+        if is_past(data["start"]):
+            return await interaction.response.send_message("❌ この枠はもう終了してるで！", ephemeral=True)
+
         user = interaction.user
         is_admin = user.guild_permissions.administrator
-        
-        # 予約済みの枠を本人が押すか、管理者が押した場合は解除/変更
         if data["status"] == 1 and data["uid"] != user.id and not is_admin:
             return await interaction.response.send_message("❌ 他人の予約は変更できへんで", ephemeral=True)
         
         if is_admin: 
-            # 管理者は 空き -> 予約済 -> 不可 のループ
             data["status"] = (data["status"] + 1) % 3
         else: 
-            # 一般ユーザーは 空き <-> 予約済 の切り替え
             data["status"] = 1 if data["status"] == 0 else 0
         
         data["user"] = user.display_name if data["status"] == 1 else ("不可" if data["status"] == 2 else "空き")
@@ -109,51 +131,44 @@ class ReserveButton(discord.ui.Button):
         
         save_data(db)
         is_second = self.index >= 17
-        await interaction.response.edit_message(
-            embed=gen_embed(db[self.gid], is_second), 
-            view=gen_view(self.gid, db[self.gid], is_second)
-        )
+        await interaction.response.edit_message(embed=gen_embed(db[self.gid], is_second), view=gen_view(self.gid, db[self.gid], is_second))
 
 def gen_view(gid, slots, is_second):
     view = discord.ui.View(timeout=None)
     idx = range(17, 34) if is_second else range(0, 17)
     for i in idx:
         d = slots[i]
+        past = is_past(d["start"])
         row = (i % 17) // 4 
-        btn = ReserveButton(gid, i, d["start"], row)
-        
-        # 色の設定
-        if d["status"] == 1:
-            btn.style = discord.ButtonStyle.danger  # 赤（予約済）
-        elif d["status"] == 2:
-            btn.style = discord.ButtonStyle.secondary # 灰（不可）
+        btn = ReserveButton(gid, i, d["start"], row, disabled=past)
+        if past:
+            btn.style = discord.ButtonStyle.secondary
         else:
-            btn.style = discord.ButtonStyle.primary   # 青（空き）
-            
+            btn.style = discord.ButtonStyle.danger if d["status"] == 1 else (discord.ButtonStyle.secondary if d["status"] == 2 else discord.ButtonStyle.primary)
         view.add_item(btn)
     return view
 
 # --- スラッシュコマンド群 ---
-@bot.tree.command(name="全時間", description="13:00〜03:00の管理表を表示します")
+@bot.tree.command(name="全時間", description="【全時間帯 (13:00〜03:00)】を表示します")
 async def setup_slash(interaction: discord.Interaction):
     db = load_data(); gid = interaction.guild_id; db[gid] = get_slots(); save_data(db)
-    await interaction.response.send_message("📢 予約管理表（全時間）を作成したで！", ephemeral=False)
+    await interaction.response.send_message("📢 予約管理表（全時間）を呼び出しました。", ephemeral=False)
     await interaction.channel.send(embed=gen_embed(db[gid], False), view=gen_view(gid, db[gid], False))
     await interaction.channel.send(embed=gen_embed(db[gid], True), view=gen_view(gid, db[gid], True))
 
-@bot.tree.command(name="前半", description="前半 (13:00〜19:40) を表示します")
+@bot.tree.command(name="前半", description="【前半 (13:00〜19:40)】のみ表示します")
 async def front_slash(interaction: discord.Interaction):
     db = load_data(); gid = interaction.guild_id
     if gid not in db: db[gid] = get_slots(); save_data(db)
     await interaction.response.send_message(embed=gen_embed(db[gid], False), view=gen_view(gid, db[gid], False))
 
-@bot.tree.command(name="後半", description="後半 (20:05〜02:45) を表示します")
+@bot.tree.command(name="後半", description="【後半 (20:05〜02:45)】のみ表示します")
 async def back_slash(interaction: discord.Interaction):
     db = load_data(); gid = interaction.guild_id
     if gid not in db: db[gid] = get_slots(); save_data(db)
     await interaction.response.send_message(embed=gen_embed(db[gid], True), view=gen_view(gid, db[gid], True))
 
-@bot.tree.command(name="リセット", description="すべての予約を白紙に戻します")
+@bot.tree.command(name="リセット", description="すべての予約をリセットします")
 async def reset_slash(interaction: discord.Interaction):
     db = load_data(); db[interaction.guild_id] = get_slots(); save_data(db)
     await interaction.response.send_message("♻️ **予約リストをリセットしたで！**")
