@@ -33,7 +33,7 @@ class MyBot(commands.Bot):
 
 bot = MyBot()
 
-# --- 💾 データ管理（リセットまで保持） ---
+# --- 💾 データ管理 ---
 DB_FILE = "reservation_data.json"
 
 def load_data():
@@ -86,16 +86,30 @@ class ReserveButton(discord.ui.Button):
         db = load_data()
         if self.gid not in db: db[self.gid] = get_slots()
         data = db[self.gid][self.index]
+        
         user = interaction.user
-        is_admin = user.guild_permissions.administrator
+        # 鯖主判定（サーバーの所有者かどうか）
+        is_owner = interaction.guild.owner_id == user.id
 
-        if data["status"] == 1 and data["uid"] != user.id and not is_admin:
-            return await interaction.response.send_message("❌ 他人の予約は変更不可！", ephemeral=True)
+        # --- 権限チェックロジック ---
+        # 1. 鯖主（A）なら無条件で上書き・変更が可能
+        # 2. 鯖主以外の場合、その枠の所有者(uid)が自分である時のみ変更可能
+        if not is_owner:
+            if data["status"] != 0 and data["uid"] != user.id:
+                return await interaction.response.send_message("❌ 他人の予約（または鯖主の枠）は変更できへんで", ephemeral=True)
 
-        if is_admin: data["status"] = (data["status"] + 1) % 3
-        else: data["status"] = 1 if data["status"] == 0 else 0
+        # --- ステータス更新 ---
+        if is_owner:
+            # 鯖主は 空き(0) -> 予約(1) -> 不可(2) の順で上書きループ
+            data["status"] = (data["status"] + 1) % 3
+        else:
+            # 一般ユーザーは 空き(0) <-> 予約(1) の切り替えのみ
+            data["status"] = 1 if data["status"] == 0 else 0
+        
+        # 名前と所有者IDを更新（ここが重要！）
         data["user"] = user.display_name if data["status"] == 1 else ("不可" if data["status"] == 2 else "空き")
-        data["uid"] = user.id if data["status"] == 1 else None
+        # 予約(1)または不可(2)にした瞬間に、操作した人（鯖主含む）が新しい所有者になる
+        data["uid"] = user.id if data["status"] != 0 else None
         
         save_data(db)
 
@@ -118,34 +132,25 @@ def gen_view(gid, slots, is_second):
 
 # --- 🚀 コマンド群 ---
 async def show_panel(interaction, front, back):
-    db = load_data()
-    gid = interaction.guild_id
+    db = load_data(); gid = interaction.guild_id
     if gid not in db: db[gid] = get_slots(); save_data(db)
-
     await interaction.response.send_message("📢 パネルを読み込み中...", ephemeral=True)
-    
-    if front:
-        await interaction.channel.send(embed=gen_main_embed(db[gid], False), view=gen_view(gid, db[gid], False))
-    if back:
-        await interaction.channel.send(embed=gen_main_embed(db[gid], True), view=gen_view(gid, db[gid], True))
+    if front: await interaction.channel.send(embed=gen_main_embed(db[gid], False), view=gen_view(gid, db[gid], False))
+    if back: await interaction.channel.send(embed=gen_main_embed(db[gid], True), view=gen_view(gid, db[gid], True))
 
-@bot.tree.command(name="全時間", description="全時間帯のパネルを表示")
-async def all_slash(interaction: discord.Interaction):
-    await show_panel(interaction, True, True)
+@bot.tree.command(name="全時間")
+async def all_slash(interaction: discord.Interaction): await show_panel(interaction, True, True)
 
-@bot.tree.command(name="前半", description="前半のパネルのみ表示")
-async def front_slash(interaction: discord.Interaction):
-    await show_panel(interaction, True, False)
+@bot.tree.command(name="前半")
+async def front_slash(interaction: discord.Interaction): await show_panel(interaction, True, False)
 
-@bot.tree.command(name="後半", description="後半のパネルのみ表示")
-async def back_slash(interaction: discord.Interaction):
-    await show_panel(interaction, False, True)
+@bot.tree.command(name="後半")
+async def back_slash(interaction: discord.Interaction): await show_panel(interaction, False, True)
 
-@bot.tree.command(name="リセット", description="【管理者専用】全データを白紙に戻す")
-@app_commands.checks.has_permissions(administrator=True)
+@bot.tree.command(name="リセット", description="誰でも全データを白紙に戻せます")
 async def reset_slash(interaction: discord.Interaction):
     db = load_data(); db[interaction.guild_id] = get_slots(); save_data(db)
-    await interaction.response.send_message("♻️ **リセット完了！**")
+    await interaction.response.send_message("♻️ **リセット完了！(誰でもリセット可能モード)**")
 
 if __name__ == "__main__":
     keep_alive()
