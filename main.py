@@ -7,7 +7,7 @@ import json
 from flask import Flask
 from threading import Thread
 
-# --- サーバー維持用 (cron-jobエラー対策: 返信を最短に) ---
+# --- サーバー維持用 (cron-jobエラー対策済み) ---
 app = Flask('')
 @app.route('/')
 def home(): 
@@ -88,30 +88,29 @@ class ReserveButton(discord.ui.Button):
         data = db[self.gid][self.index]
         
         user = interaction.user
-        # 鯖主判定（サーバーの所有者かどうか）のみ！
         is_owner = interaction.guild.owner_id == user.id
 
-        # --- 権限チェック ---
         if not is_owner:
-            # 一般ユーザーは「不可」枠は触れない
             if data["status"] == 2:
                 return await interaction.response.send_message("❌ この枠は現在使用不可やで。", ephemeral=True)
-            # 一般ユーザーは他人の予約は触れない
             if data["status"] == 1 and data["uid"] != user.id:
                 return await interaction.response.send_message("❌ 他人の予約は変更できへんで。", ephemeral=True)
 
-        # --- ステータス更新 ---
+        # ステータス更新 (鯖主: 0→1→2→0 / 一般: 0<->1)
         if is_owner:
-            data["status"] = (data["status"] + 1) % 3 # 空→予約→不可→空
+            data["status"] = (data["status"] + 1) % 3
         else:
-            data["status"] = 1 if data["status"] == 0 else 0 # 空<->予約
+            data["status"] = 1 if data["status"] == 0 else 0
         
         data["user"] = user.display_name if data["status"] == 1 else ("不可" if data["status"] == 2 else "空き")
         data["uid"] = user.id if data["status"] != 0 else None
         
         save_data(db)
         is_second = self.index >= 17
-        await interaction.response.edit_message(embed=gen_main_embed(db[self.gid], is_second), view=gen_view(self.gid, db[self.gid], is_second))
+        await interaction.response.edit_message(
+            embed=gen_main_embed(db[self.gid], is_second),
+            view=gen_view(self.gid, db[self.gid], is_second)
+        )
 
 def gen_view(gid, slots, is_second):
     view = discord.ui.View(timeout=None)
@@ -125,34 +124,29 @@ def gen_view(gid, slots, is_second):
     return view
 
 # --- 🚀 コマンド群 ---
-@bot.tree.command(name="予約", description="時刻指定予約（例: 13:00）")
-async def reserve_slash(interaction: discord.Interaction, 時刻: str):
-    db = load_data(); gid = interaction.guild_id
-    if gid not in db: db[gid] = get_slots()
-    slot = next((s for s in db[gid] if s["start"] == 時刻), None)
-    if not slot: return await interaction.response.send_message("❌ 時刻が正しくないで。", ephemeral=True)
-    
-    user = interaction.user
-    is_owner = interaction.guild.owner_id == user.id
-    if not is_owner and slot["status"] != 0 and slot["uid"] != user.id:
-        return await interaction.response.send_message("❌ 予約済みの枠やで。", ephemeral=True)
-        
-    slot["status"], slot["user"], slot["uid"] = 1, user.display_name, user.id
-    save_data(db)
-    await interaction.response.send_message(f"✅ {時刻} を予約したで！", ephemeral=False)
-
-@bot.tree.command(name="全時間")
-async def all_slash(interaction: discord.Interaction):
+async def show_panel(interaction, front, back):
     db = load_data(); gid = interaction.guild_id
     if gid not in db: db[gid] = get_slots(); save_data(db)
-    await interaction.response.send_message("📢 表示中...", ephemeral=True)
-    await interaction.channel.send(embed=gen_main_embed(db[gid], False), view=gen_view(gid, db[gid], False))
-    await interaction.channel.send(embed=gen_main_embed(db[gid], True), view=gen_view(gid, db[gid], True))
+    await interaction.response.send_message("📢 読み込み中...", ephemeral=True)
+    if front: await interaction.channel.send(embed=gen_main_embed(db[gid], False), view=gen_view(gid, db[gid], False))
+    if back: await interaction.channel.send(embed=gen_main_embed(db[gid], True), view=gen_view(gid, db[gid], True))
 
-@bot.tree.command(name="リセット")
+@bot.tree.command(name="全時間", description="全ての予約パネルを表示します")
+async def all_slash(interaction: discord.Interaction):
+    await show_panel(interaction, True, True)
+
+@bot.tree.command(name="前半", description="前半の予約パネルを表示します")
+async def front_slash(interaction: discord.Interaction):
+    await show_panel(interaction, True, False)
+
+@bot.tree.command(name="後半", description="後半の予約パネルを表示します")
+async def back_slash(interaction: discord.Interaction):
+    await show_panel(interaction, False, True)
+
+@bot.tree.command(name="リセット", description="全ての予約データをリセットします")
 async def reset_slash(interaction: discord.Interaction):
     db = load_data(); db[interaction.guild_id] = get_slots(); save_data(db)
-    await interaction.response.send_message("♻️ **リセット完了！**")
+    await interaction.response.send_message("♻️ **予約データをリセットしたで！**")
 
 if __name__ == "__main__":
     keep_alive()
