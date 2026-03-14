@@ -7,11 +7,11 @@ import json
 from flask import Flask
 from threading import Thread
 
-# --- サーバー維持用 ---
+# --- サーバー維持用 (cron-jobエラー対策: 返信を最短に) ---
 app = Flask('')
 @app.route('/')
 def home(): 
-    return f"Bot is active! {datetime.datetime.now()}"
+    return "ok", 200 
 
 def run(): 
     app.run(host='0.0.0.0', port=10000)
@@ -88,36 +88,30 @@ class ReserveButton(discord.ui.Button):
         data = db[self.gid][self.index]
         
         user = interaction.user
-        # 鯖主判定（サーバーの所有者かどうか）
+        # 鯖主判定（サーバーの所有者かどうか）のみ！
         is_owner = interaction.guild.owner_id == user.id
 
-        # --- 権限チェックロジック ---
-        # 1. 鯖主（A）なら無条件で上書き・変更が可能
-        # 2. 鯖主以外の場合、その枠の所有者(uid)が自分である時のみ変更可能
+        # --- 権限チェック ---
         if not is_owner:
-            if data["status"] != 0 and data["uid"] != user.id:
-                return await interaction.response.send_message("❌ 他人の予約（または鯖主の枠）は変更できへんで", ephemeral=True)
+            # 一般ユーザーは「不可」枠は触れない
+            if data["status"] == 2:
+                return await interaction.response.send_message("❌ この枠は現在使用不可やで。", ephemeral=True)
+            # 一般ユーザーは他人の予約は触れない
+            if data["status"] == 1 and data["uid"] != user.id:
+                return await interaction.response.send_message("❌ 他人の予約は変更できへんで。", ephemeral=True)
 
         # --- ステータス更新 ---
         if is_owner:
-            # 鯖主は 空き(0) -> 予約(1) -> 不可(2) の順で上書きループ
-            data["status"] = (data["status"] + 1) % 3
+            data["status"] = (data["status"] + 1) % 3 # 空→予約→不可→空
         else:
-            # 一般ユーザーは 空き(0) <-> 予約(1) の切り替えのみ
-            data["status"] = 1 if data["status"] == 0 else 0
+            data["status"] = 1 if data["status"] == 0 else 0 # 空<->予約
         
-        # 名前と所有者IDを更新（ここが重要！）
         data["user"] = user.display_name if data["status"] == 1 else ("不可" if data["status"] == 2 else "空き")
-        # 予約(1)または不可(2)にした瞬間に、操作した人（鯖主含む）が新しい所有者になる
         data["uid"] = user.id if data["status"] != 0 else None
         
         save_data(db)
-
         is_second = self.index >= 17
-        await interaction.response.edit_message(
-            embed=gen_main_embed(db[self.gid], is_second),
-            view=gen_view(self.gid, db[self.gid], is_second)
-        )
+        await interaction.response.edit_message(embed=gen_main_embed(db[self.gid], is_second), view=gen_view(self.gid, db[self.gid], is_second))
 
 def gen_view(gid, slots, is_second):
     view = discord.ui.View(timeout=None)
@@ -131,26 +125,34 @@ def gen_view(gid, slots, is_second):
     return view
 
 # --- 🚀 コマンド群 ---
-async def show_panel(interaction, front, back):
+@bot.tree.command(name="予約", description="時刻指定予約（例: 13:00）")
+async def reserve_slash(interaction: discord.Interaction, 時刻: str):
     db = load_data(); gid = interaction.guild_id
-    if gid not in db: db[gid] = get_slots(); save_data(db)
-    await interaction.response.send_message("📢 パネルを読み込み中...", ephemeral=True)
-    if front: await interaction.channel.send(embed=gen_main_embed(db[gid], False), view=gen_view(gid, db[gid], False))
-    if back: await interaction.channel.send(embed=gen_main_embed(db[gid], True), view=gen_view(gid, db[gid], True))
+    if gid not in db: db[gid] = get_slots()
+    slot = next((s for s in db[gid] if s["start"] == 時刻), None)
+    if not slot: return await interaction.response.send_message("❌ 時刻が正しくないで。", ephemeral=True)
+    
+    user = interaction.user
+    is_owner = interaction.guild.owner_id == user.id
+    if not is_owner and slot["status"] != 0 and slot["uid"] != user.id:
+        return await interaction.response.send_message("❌ 予約済みの枠やで。", ephemeral=True)
+        
+    slot["status"], slot["user"], slot["uid"] = 1, user.display_name, user.id
+    save_data(db)
+    await interaction.response.send_message(f"✅ {時刻} を予約したで！", ephemeral=False)
 
 @bot.tree.command(name="全時間")
-async def all_slash(interaction: discord.Interaction): await show_panel(interaction, True, True)
+async def all_slash(interaction: discord.Interaction):
+    db = load_data(); gid = interaction.guild_id
+    if gid not in db: db[gid] = get_slots(); save_data(db)
+    await interaction.response.send_message("📢 表示中...", ephemeral=True)
+    await interaction.channel.send(embed=gen_main_embed(db[gid], False), view=gen_view(gid, db[gid], False))
+    await interaction.channel.send(embed=gen_main_embed(db[gid], True), view=gen_view(gid, db[gid], True))
 
-@bot.tree.command(name="前半")
-async def front_slash(interaction: discord.Interaction): await show_panel(interaction, True, False)
-
-@bot.tree.command(name="後半")
-async def back_slash(interaction: discord.Interaction): await show_panel(interaction, False, True)
-
-@bot.tree.command(name="リセット", description="誰でも全データを白紙に戻せます")
+@bot.tree.command(name="リセット")
 async def reset_slash(interaction: discord.Interaction):
     db = load_data(); db[interaction.guild_id] = get_slots(); save_data(db)
-    await interaction.response.send_message("♻️ **リセット完了！(誰でもリセット可能モード)**")
+    await interaction.response.send_message("♻️ **リセット完了！**")
 
 if __name__ == "__main__":
     keep_alive()
